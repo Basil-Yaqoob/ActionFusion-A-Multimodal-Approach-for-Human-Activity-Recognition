@@ -216,3 +216,27 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# --- Project-local files (do not push) ---
+# Copilot/agent customization created for local workflow
+AGENTS.md
+.github/copilot-instructions.md
+.github/agents/
+.github/instructions/
+.github/prompts/
+
+# Dataset and experiment artifacts
+data/raw/
+data/processed/
+results/
+
+# Training outputs and logs
+checkpoints/
+logs/
+*.pt
+*.pth
+*.ckpt
+
+# Local docs/artifacts
+UTD_MHAD_Implementation_Plan.md
+Multi-Modal_Data_Fusion_Based_Cardiac_Disease_Prediction_using_Late_Fusion_and_2D_CNN_Architectures.pdf
