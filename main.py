@@ -16,9 +16,32 @@ from models.decision_level_fusion import (
     train_unimodal_classifiers,
 )
 from models.feature_level_fusion import train_feature_level_fusion
-from step5_run_data_level_fusion import _load_processed_features
 from utils.evaluation import compute_metrics, save_confusion_matrix_plot
 from utils.splits import get_subject_split
+
+
+def _load_processed_features(processed_dir: Path) -> tuple[dict[str, np.ndarray], np.ndarray, np.ndarray]:
+    modality_files = {
+        "skeleton": processed_dir / "skeleton_features.npy",
+        "inertial": processed_dir / "inertial_features.npy",
+        "depth": processed_dir / "depth_features.npy",
+        "rgb": processed_dir / "rgb_features.npy",
+    }
+    labels_path = processed_dir / "labels.npy"
+    subjects_path = processed_dir / "subjects.npy"
+
+    missing = [
+        str(path)
+        for path in list(modality_files.values()) + [labels_path, subjects_path]
+        if not path.exists()
+    ]
+    if missing:
+        raise FileNotFoundError("Missing processed files:\n" + "\n".join(missing))
+
+    features = {name: np.load(path) for name, path in modality_files.items()}
+    labels = np.load(labels_path)
+    subjects = np.load(subjects_path)
+    return features, labels, subjects
 
 
 def _save_comparison_plot(frame: pd.DataFrame, output_path: Path) -> None:
