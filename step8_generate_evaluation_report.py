@@ -63,8 +63,7 @@ def main() -> int:
     plots_dir = project_root / "results" / "plots"
 
     required = {
-        "step5_baseline": tables_dir / "step5_data_level_metrics.csv",
-        "step5_tuned": tables_dir / "step5_data_level_tuned_metrics.csv",
+        "step5_data_level": tables_dir / "step5_data_level_metrics.csv",
         "step6_feature": tables_dir / "step6_feature_level_metrics.csv",
         "step7_vote": tables_dir / "step7_decision_level_vote_metrics.csv",
         "step7_learned": tables_dir / "step7_decision_level_learned_metrics.csv",
@@ -80,8 +79,7 @@ def main() -> int:
 
     fusion_rows = pd.concat(
         [
-            _read_metrics_row(required["step5_baseline"], "Data-Level Baseline"),
-            _read_metrics_row(required["step5_tuned"], "Data-Level Tuned"),
+            _read_metrics_row(required["step5_data_level"], "Data-Level"),
             _read_metrics_row(required["step6_feature"], "Feature-Level"),
             _read_metrics_row(required["step7_vote"], "Decision-Level Vote"),
             _read_metrics_row(required["step7_learned"], "Decision-Level Learned"),
