@@ -56,6 +56,21 @@ def get_subject_split(
     )
 
 
+def get_leave_one_subject_out_splits(subjects: np.ndarray) -> List[SplitResult]:
+    """Return deterministic leave-one-subject-out splits."""
+    if subjects.ndim != 1:
+        raise ValueError(f"subjects must be 1D, got shape {subjects.shape}")
+
+    unique_subjects = sorted(set(int(x) for x in subjects.tolist()))
+    if len(unique_subjects) < 2:
+        raise ValueError("LOSO requires at least two unique subjects")
+
+    splits: List[SplitResult] = []
+    for test_subject in unique_subjects:
+        splits.append(get_subject_split(subjects=subjects, test_subjects=(test_subject,)))
+    return splits
+
+
 def get_stratified_kfold_splits(
     labels: np.ndarray,
     n_splits: int = 5,

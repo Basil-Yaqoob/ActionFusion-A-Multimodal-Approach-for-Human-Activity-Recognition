@@ -17,7 +17,7 @@ from models.decision_level_fusion import (
 )
 from models.feature_level_fusion import train_feature_level_fusion
 from utils.evaluation import compute_metrics, save_confusion_matrix_plot
-from utils.splits import get_stratified_kfold_splits, get_subject_split
+from utils.splits import get_leave_one_subject_out_splits, get_stratified_kfold_splits, get_subject_split
 
 
 METHOD_ORDER = (
@@ -72,6 +72,13 @@ def _save_comparison_plot(frame: pd.DataFrame, output_path: Path) -> None:
     plt.tight_layout()
     plt.savefig(output_path, dpi=150)
     plt.close()
+
+
+def _save_workbook(sheets: dict[str, pd.DataFrame], output_path: Path) -> None:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
+        for sheet_name, frame in sheets.items():
+            frame.to_excel(writer, sheet_name=sheet_name[:31], index=False)
 
 
 def _to_row(method: str, metrics: Dict[str, float]) -> Dict[str, float | str]:
@@ -185,6 +192,64 @@ def _evaluate_subject_split(
     )
 
 
+def _evaluate_leave_one_subject_out(
+    features: dict[str, np.ndarray],
+    labels: np.ndarray,
+    subjects: np.ndarray,
+    feature_threshold: float,
+    late_epochs: int,
+    late_lr: float,
+) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, np.ndarray], dict[str, list[int]], list[int], list[int]]:
+    splits = get_leave_one_subject_out_splits(subjects=subjects)
+
+    out_of_fold_predictions = {
+        method: np.full(labels.shape[0], -1, dtype=np.int64)
+        for method in METHOD_ORDER
+    }
+    subject_rows: list[dict[str, float | int | str]] = []
+    selected_by_modality: dict[str, list[int]] = {modality: [] for modality in MODALITY_ORDER}
+    train_sizes: list[int] = []
+    test_sizes: list[int] = []
+
+    for held_out_split in splits:
+        held_out_subject = int(held_out_split.test_subjects[0])
+        print(f"\n--- LOSO subject {held_out_subject} ---")
+        metrics, predictions, selected_counts = _evaluate_split(
+            features=features,
+            labels=labels,
+            train_idx=held_out_split.train_idx,
+            test_idx=held_out_split.test_idx,
+            feature_threshold=feature_threshold,
+            late_epochs=late_epochs,
+            late_lr=late_lr,
+        )
+
+        train_sizes.append(int(held_out_split.train_idx.shape[0]))
+        test_sizes.append(int(held_out_split.test_idx.shape[0]))
+
+        for method in METHOD_ORDER:
+            out_of_fold_predictions[method][held_out_split.test_idx] = predictions[method]
+            subject_rows.append(
+                {
+                    "held_out_subject": held_out_subject,
+                    **_to_row(method, metrics[method]),
+                }
+            )
+
+        for modality, count in selected_counts.items():
+            selected_by_modality[modality].append(int(count))
+
+    if any(np.any(prediction == -1) for prediction in out_of_fold_predictions.values()):
+        raise RuntimeError("LOSO predictions were not fully populated")
+
+    comparison = pd.DataFrame([
+        _to_row(method, compute_metrics(y_true=labels, y_pred=out_of_fold_predictions[method]))
+        for method in METHOD_ORDER
+    ])
+    subject_metrics = pd.DataFrame(subject_rows)
+    return comparison, subject_metrics, out_of_fold_predictions, selected_by_modality, train_sizes, test_sizes
+
+
 def _evaluate_kfold(
     features: dict[str, np.ndarray],
     labels: np.ndarray,
@@ -244,9 +309,9 @@ def main() -> int:
     parser.add_argument("--results-dir", type=Path, default=Path("results"))
     parser.add_argument(
         "--eval-mode",
-        choices=("kfold", "subject"),
-        default="subject",
-        help="Run k-fold cross-validation or the original subject holdout split.",
+        choices=("loso", "kfold", "subject"),
+        default="loso",
+        help="Run leave-one-subject-out, k-fold cross-validation, or the original subject holdout split.",
     )
     parser.add_argument("--cv-folds", type=int, default=5)
     parser.add_argument("--random-state", type=int, default=42)
@@ -287,6 +352,54 @@ def main() -> int:
         train_samples_display = str(int(y_train_reference.shape[0]))
         test_samples_display = str(int(y_true_reference.shape[0]))
         selected_rows: list[dict[str, float | str]] = []
+        workbook_sheets = {
+            "comparison": comparison,
+            "ranking": pd.DataFrame(),
+        }
+    elif args.eval_mode == "loso":
+        (
+            comparison,
+            subject_metrics,
+            predictions,
+            selected_by_modality,
+            train_sizes,
+            test_sizes,
+        ) = _evaluate_leave_one_subject_out(
+            features=features,
+            labels=labels,
+            subjects=subjects,
+            feature_threshold=args.feature_threshold,
+            late_epochs=args.late_epochs,
+            late_lr=args.late_lr,
+        )
+        artifact_prefix = "step9_loso"
+        split_label = "Leave-one-subject-out"
+        y_true_reference = labels
+        train_subjects = tuple(sorted(set(int(x) for x in subjects.tolist())))
+        test_subjects_observed = train_subjects
+        train_samples_display = f"{np.mean(train_sizes):.1f} avg"
+        test_samples_display = f"{np.mean(test_sizes):.1f} avg"
+        selected_rows = []
+
+        subject_metrics.to_csv(tables_dir / f"{artifact_prefix}_subject_metrics.csv", index=False)
+        for modality in MODALITY_ORDER:
+            values = np.asarray(selected_by_modality[modality], dtype=np.float64)
+            selected_rows.append(
+                {
+                    "modality": modality,
+                    "mean_selected": float(values.mean()),
+                    "std_selected": float(values.std(ddof=0)),
+                    "min_selected": float(values.min()),
+                    "max_selected": float(values.max()),
+                }
+            )
+        pd.DataFrame(selected_rows).to_csv(tables_dir / f"{artifact_prefix}_selected_feature_counts.csv", index=False)
+        workbook_sheets = {
+            "comparison": comparison,
+            "ranking": pd.DataFrame(),
+            "subject_metrics": subject_metrics,
+            "selected_features": pd.DataFrame(selected_rows),
+        }
     else:
         (
             comparison,
@@ -326,12 +439,25 @@ def main() -> int:
                 }
             )
         pd.DataFrame(selected_rows).to_csv(tables_dir / f"{artifact_prefix}_selected_feature_counts.csv", index=False)
+        workbook_sheets = {
+            "comparison": comparison,
+            "ranking": pd.DataFrame(),
+            "fold_metrics": fold_metrics,
+            "selected_features": pd.DataFrame(selected_rows),
+        }
 
     ranking = comparison.sort_values(["accuracy", "f1_macro"], ascending=False).reset_index(drop=True)
     ranking.insert(0, "rank", ranking.index + 1)
 
     comparison.to_csv(tables_dir / f"{artifact_prefix}_fusion_comparison.csv", index=False)
     ranking.to_csv(tables_dir / f"{artifact_prefix}_fusion_ranking.csv", index=False)
+    _save_workbook(
+        {
+            **workbook_sheets,
+            "ranking": ranking,
+        },
+        tables_dir / f"{artifact_prefix}_fusion_results.xlsx",
+    )
 
     _save_comparison_plot(comparison, plots_dir / f"{artifact_prefix}_fusion_accuracy_comparison.png")
 
@@ -376,8 +502,12 @@ def main() -> int:
     print("\nArtifacts:")
     print(f"  - {tables_dir / f'{artifact_prefix}_fusion_comparison.csv'}")
     print(f"  - {tables_dir / f'{artifact_prefix}_fusion_ranking.csv'}")
+    print(f"  - {tables_dir / f'{artifact_prefix}_fusion_results.xlsx'}")
     if args.eval_mode == "kfold":
         print(f"  - {tables_dir / f'{artifact_prefix}_fold_metrics.csv'}")
+        print(f"  - {tables_dir / f'{artifact_prefix}_selected_feature_counts.csv'}")
+    elif args.eval_mode == "loso":
+        print(f"  - {tables_dir / f'{artifact_prefix}_subject_metrics.csv'}")
         print(f"  - {tables_dir / f'{artifact_prefix}_selected_feature_counts.csv'}")
     print(f"  - {plots_dir / f'{artifact_prefix}_fusion_accuracy_comparison.png'}")
     for method in METHOD_ORDER:
