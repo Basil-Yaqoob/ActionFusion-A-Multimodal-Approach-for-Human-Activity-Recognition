@@ -72,6 +72,42 @@ def get_stratified_kfold_splits(
     return list(splitter.split(dummy_x, labels))
 
 
+
+def get_loso_splits(
+    subjects: np.ndarray,
+) -> List[Tuple[np.ndarray, np.ndarray]]:
+    """Generate Leave-One-Subject-Out splits.
+    
+    For each unique subject, create a fold where:
+    - test_idx: all samples from that subject
+    - train_idx: all samples from other subjects
+    
+    Returns list of (train_idx, test_idx) tuples in sorted order by test subject ID.
+    """
+    if subjects.ndim != 1:
+        raise ValueError(f"subjects must be 1D, got shape {subjects.shape}")
+    
+    unique_subjects = sorted(set(int(s) for s in subjects))
+    if len(unique_subjects) < 2:
+        raise ValueError(f"Need at least 2 subjects for LOSO, got {len(unique_subjects)}")
+    
+    splits = []
+    for test_subject in unique_subjects:
+        test_mask = subjects == test_subject
+        test_idx = np.where(test_mask)[0]
+        train_idx = np.where(~test_mask)[0]
+        
+        if test_idx.size == 0 or train_idx.size == 0:
+            raise RuntimeError(
+                f"Empty split for subject {test_subject}: "
+                f"train_size={train_idx.size}, test_size={test_idx.size}"
+            )
+        
+        splits.append((train_idx, test_idx))
+    
+    return splits
+
+
 def summarize_split(
     labels: np.ndarray,
     subjects: np.ndarray,

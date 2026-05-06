@@ -17,7 +17,7 @@ from models.decision_level_fusion import (
 )
 from models.feature_level_fusion import train_feature_level_fusion
 from utils.evaluation import compute_metrics, save_confusion_matrix_plot
-from utils.splits import get_stratified_kfold_splits, get_subject_split
+from utils.splits import get_loso_splits, get_stratified_kfold_splits, get_subject_split
 
 
 METHOD_ORDER = (
@@ -238,15 +238,85 @@ def _evaluate_kfold(
     return comparison, fold_metrics, out_of_fold_predictions, selected_by_modality, train_sizes, test_sizes
 
 
+def _evaluate_loso(
+    features: dict[str, np.ndarray],
+    labels: np.ndarray,
+    subjects: np.ndarray,
+    feature_threshold: float,
+    late_epochs: int,
+    late_lr: float,
+) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, np.ndarray], dict[str, list[int]], list[int], list[int], list[int]]:
+    """Evaluate using Leave-One-Subject-Out cross-validation.
+    
+    For each unique subject:
+    - Train on all other subjects
+    - Test on the held-out subject
+    
+    Returns comparison metrics, fold-wise metrics, predictions, feature selection stats, 
+    train/test sizes, and held-out subject IDs.
+    """
+    splits = get_loso_splits(subjects=subjects)
+    unique_subjects = sorted(set(int(s) for s in subjects))
+
+    out_of_fold_predictions = {
+        method: np.full(labels.shape[0], -1, dtype=np.int64)
+        for method in METHOD_ORDER
+    }
+    fold_rows: list[dict[str, float | int | str]] = []
+    selected_by_modality: dict[str, list[int]] = {modality: [] for modality in MODALITY_ORDER}
+    train_sizes: list[int] = []
+    test_sizes: list[int] = []
+    held_out_subjects: list[int] = []
+
+    for fold_number, (train_idx, test_idx) in enumerate(splits, start=1):
+        held_out_subject = unique_subjects[fold_number - 1]
+        held_out_subjects.append(int(held_out_subject))
+        print(f"\n--- LOSO Fold {fold_number}/{len(unique_subjects)} (held-out subject: {held_out_subject}) ---")
+        
+        metrics, predictions, selected_counts = _evaluate_split(
+            features=features,
+            labels=labels,
+            train_idx=train_idx,
+            test_idx=test_idx,
+            feature_threshold=feature_threshold,
+            late_epochs=late_epochs,
+            late_lr=late_lr,
+        )
+
+        train_sizes.append(int(train_idx.shape[0]))
+        test_sizes.append(int(test_idx.shape[0]))
+
+        for method in METHOD_ORDER:
+            out_of_fold_predictions[method][test_idx] = predictions[method]
+            fold_rows.append({
+                "fold": fold_number,
+                "held_out_subject": held_out_subject,
+                **_to_row(method, metrics[method])
+            })
+
+        for modality, count in selected_counts.items():
+            selected_by_modality[modality].append(int(count))
+
+    if any(np.any(prediction == -1) for prediction in out_of_fold_predictions.values()):
+        raise RuntimeError("LOSO predictions were not fully populated")
+
+    comparison = pd.DataFrame([
+        _to_row(method, compute_metrics(y_true=labels, y_pred=out_of_fold_predictions[method]))
+        for method in METHOD_ORDER
+    ])
+    fold_metrics = pd.DataFrame(fold_rows)
+    return comparison, fold_metrics, out_of_fold_predictions, selected_by_modality, train_sizes, test_sizes, held_out_subjects
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Step 9: Run all fusion strategies end-to-end")
     parser.add_argument("--processed-dir", type=Path, default=Path("data/processed"))
     parser.add_argument("--results-dir", type=Path, default=Path("results"))
     parser.add_argument(
         "--eval-mode",
-        choices=("kfold", "subject"),
+        choices=("kfold", "subject", "loso"),
         default="subject",
-        help="Run k-fold cross-validation or the original subject holdout split.",
+        help="Run k-fold cross-validation, subject holdout split, or Leave-One-Subject-Out.",
     )
     parser.add_argument("--cv-folds", type=int, default=5)
     parser.add_argument("--random-state", type=int, default=42)
@@ -287,7 +357,7 @@ def main() -> int:
         train_samples_display = str(int(y_train_reference.shape[0]))
         test_samples_display = str(int(y_true_reference.shape[0]))
         selected_rows: list[dict[str, float | str]] = []
-    else:
+    elif args.eval_mode == "kfold":
         (
             comparison,
             fold_metrics,
@@ -306,6 +376,45 @@ def main() -> int:
         )
         artifact_prefix = "step9_kfold"
         split_label = f"Stratified {args.cv_folds}-fold cross-validation"
+        y_true_reference = labels
+        train_subjects = tuple(sorted(set(int(x) for x in subjects.tolist())))
+        test_subjects_observed = train_subjects
+        train_samples_display = f"{np.mean(train_sizes):.1f} avg"
+        test_samples_display = f"{np.mean(test_sizes):.1f} avg"
+        selected_rows = []
+
+        fold_metrics.to_csv(tables_dir / f"{artifact_prefix}_fold_metrics.csv", index=False)
+        for modality in MODALITY_ORDER:
+            values = np.asarray(selected_by_modality[modality], dtype=np.float64)
+            selected_rows.append(
+                {
+                    "modality": modality,
+                    "mean_selected": float(values.mean()),
+                    "std_selected": float(values.std(ddof=0)),
+                    "min_selected": float(values.min()),
+                    "max_selected": float(values.max()),
+                }
+            )
+        pd.DataFrame(selected_rows).to_csv(tables_dir / f"{artifact_prefix}_selected_feature_counts.csv", index=False)
+    else:  # args.eval_mode == "loso"
+        (
+            comparison,
+            fold_metrics,
+            predictions,
+            selected_by_modality,
+            train_sizes,
+            test_sizes,
+            held_out_subjects,
+        ) = _evaluate_loso(
+            features=features,
+            labels=labels,
+            subjects=subjects,
+            feature_threshold=args.feature_threshold,
+            late_epochs=args.late_epochs,
+            late_lr=args.late_lr,
+        )
+        artifact_prefix = "step9_loso"
+        split_label = "Leave-One-Subject-Out cross-validation"
         y_true_reference = labels
         train_subjects = tuple(sorted(set(int(x) for x in subjects.tolist())))
         test_subjects_observed = train_subjects
